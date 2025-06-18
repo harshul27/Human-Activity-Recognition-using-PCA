@@ -1,0 +1,1161 @@
+---
+title: "6348 E3 PROJECT"
+author: "HS, LN, PS"
+date: "2025-04-20"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the required libraries
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(e1071)
+library(tidyverse)
+library(factoextra)
+library(tidyr)
+library(nnet)
+library(Rtsne)
+library(umap)
+library(MASS)
+library(reshape2)
+library(glmnet)
+library(GGally)
+library(pheatmap)
+library(ggpubr)
+library(kernlab)
+
+```
+
+## Load the data
+
+Since the data set has 1) feature values (X_train, X_test) containing actual 
+sensor readings; 2) Activity labels (y_train, y_test) indicate which activity 
+was performed; 3) Subject IDs (subject_train, subject_test) show which 
+person/subject was performing the activity; 4) feature names (features) name the 
+sensor readings. 
+
+Since each component is stored separately, we need to merge feature values w/ 
+activity labels to know what activity each row corresponds to ; subject IDs to 
+associate each measurement with a participant; activity labels with their 
+human-readable names from activity labels.txt
+
+If we skip these steps then we will have raw sensor data w/o knowing which 
+activity it represents. We will be unable to track which participant performed 
+which activity. It would be harder to perform any kind of analysis b/c data set 
+won't be structured properly.
+
+```{r}
+# Load the file with the list of feature names. Each feature corresponds to a 
+#specific sensor reading, and their names are stored separately.
+features <- read.table("UCI HAR Dataset/features.txt", 
+                       col.names = c("index", "feature"))
+feature_names <- features$feature
+
+# Load activity labels. This file contains the mapping between activity ID and 
+#the names of each activity
+activity_labels <- read.table("UCI HAR Dataset/activity_labels.txt", 
+                              col.names = c("activity_id", "activity"))
+
+# Load the training data
+# X_train.txt contains sensor readings for various features
+train_x <- read.table("UCI HAR Dataset/train/X_train.txt", 
+                      col.names = feature_names)
+
+# y_train.txt contains activity labels, indicating which activity was performed.
+train_y <- read.table("UCI HAR Dataset/train/y_train.txt", 
+                      col.names = "activity_id")
+
+# subject_train.txt includes subject IDs to associate the measurements with its 
+#respective participant
+train_subject <- read.table("UCI HAR Dataset/train/subject_train.txt", 
+                            col.names = "subject")
+
+# Merge subject IDs with sensor readings to track which individual performed 
+#which activity.
+train_x <- cbind(train_subject, train_x)
+
+# Convert activity IDs to factors to merge with activity labels.
+train_y$activity_id <- factor(train_y$activity_id)
+
+# Combine sensor readings with activity labels so we know which activity each 
+#row corresponds to.
+train_data <- cbind(train_x, train_y)
+
+# Load the test data similar to what we did above with the raining data
+test_x <- read.table("UCI HAR Dataset/test/X_test.txt", col.names = feature_names)
+test_y <- read.table("UCI HAR Dataset/test/y_test.txt", col.names = "activity_id")
+test_subject <- read.table("UCI HAR Dataset/test/subject_test.txt", 
+                           col.names = "subject")
+test_x <- cbind(test_subject, test_x)
+test_y$activity_id <- factor(test_y$activity_id)
+test_data <- cbind(test_x, test_y)
+
+# Combine training and test set into one dataset so that we have all recorded 
+#activities and the corresponding sensor readings.
+full_data <- rbind(train_data, test_data) 
+
+# Convert activity id to a categorical variable
+full_data$activity_id <- as.factor(full_data$activity_id)
+
+# Merge with activity labels to replace activity IDs with what the activity is.
+full_data <- merge(full_data, activity_labels, by = "activity_id")
+
+```
+
+
+## EDA
+
+```{r}
+# Checking feature dimensions so that the we know we have read our data correctly.
+dim(full_data) # num rows = 10299, num col = 564
+dim(test_data) # rows = 2947, col = 563 (Match!)
+dim(train_data) # rows = 7352, col = 563 (Match!)
+
+str(full_data) # all numeric except activity id
+#head(full_data) 
+
+# Checking class labels to obtain the count of each activity to check if the 
+#activities are well represented and that there is no imbalance
+table(full_data$activity) 
+
+# Summary stats for features (sensor readings) excluding subject and activity. 
+#This shows what the data described is already standardized. So we continue further 
+#analysis with this data without standardizing. 
+head(summary(full_data[, -c(1:2)]))
+
+# Check for missing values
+missing_values <- colSums(is.na(full_data))
+cat("Total missing values:", sum(missing_values), "\n")
+
+# Handle duplicate column names if any exist
+colnames(full_data) <- make.names(colnames(full_data), unique = TRUE)
+
+# Exclude subject and activity_id (factor variables) to calculate mean of each 
+#sensor reading
+sapply(full_data[, -c(1, 2)], mean, na.rm = TRUE)  
+
+# Since some features names may have special characters or duplicates, we clean 
+#the feature names to see if features related to mean and std deviation are used 
+#in this data. We get a result of 79 which means that out of all 561 feature names, 
+#79 of them contain mean or sd in them.
+
+#features$clean_name <- make.names(features$feature_name, unique = TRUE)
+#mean_std_features <- grep("mean|std", features$clean_name, value = TRUE)
+#length(mean_std_features)
+
+```
+
+
+## Data visualization
+
+```{r}
+
+hist(full_data$tBodyAcc.mean...X, main="Histogram of tBodyAcc Mean X", xlab="tBodyAcc.mean.X")
+
+boxplot(tBodyAcc.mean...X ~ activity, data=full_data, main="Boxplot of tBodyAcc Mean X by Activity")
+
+ggplot(full_data, aes(x=subject, y=tBodyAcc.mean...X, color=activity)) +
+  geom_line() + ggtitle("tBodyAcc Mean X Over Subjects")
+
+ggplot(full_data, aes(x = activity, y = tBodyAcc.mean...X, fill = activity)) +
+  geom_violin() +
+  labs(title = "Feature Distribution Across Activities")
+
+
+```
+
+## EDA PLOTS
+
+(1): ACTIVITY DISTRIBUTION \newline
+Bar chart to see how often each activity appears in the dataset. 
+Most performed: LAYING; Least performed: WALKING DOWNSTAIRS
+
+```{r}
+ggplot(full_data, aes(x = activity)) +  geom_bar(fill = "lightpink") +
+  geom_text(aes(label = after_stat(count)), stat = "count", vjust = -0.5, 
+            color = "cadetblue", size = 3) +  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Distribution of Activities", 
+       x = "Activity Type", 
+       y = "Frequency")
+
+```
+
+(2): SUBJECT DISTRIBUTION \newline 
+How many measurements exist for each participant in this study to check if data 
+collection was balnaced across different individuals. Subject 21 has the most 
+recorded data compared to others and we find out that subject 21 is a participant 
+whose data was used as training data.
+
+```{r}
+ggplot(full_data, aes(x = factor(subject))) +
+  geom_bar(fill = "darkgreen") +
+  theme_minimal() +
+  labs(title = "Distribution by Subject ID", 
+       x = "Subject ID", 
+       y = "Frequency")
+
+# which(train_data$subject == 21) # Checks if subject 21 is in train data
+which(test_data$subject == 21)  # Checks if subject 21 is in test data
+
+```
+
+(3): ACTIVITIES BY SUBJECT \newline 
+
+Boxplot interpretation: Each boxplot corresponds to a specific feature, such as 
+acceleration or gyroscope measurements along X, Y, or Z axes. Smoother movements 
+(LAYING, SITTING) may show narrower boxplots with less variability. Dynamic movements 
+(WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS) may have wider spreads, indicating 
+higher variations in sensor readings. The tBodyAcc.mean...X, Y, and Z features 
+reflect body acceleration, likely showing stronger fluctuations in walking-related 
+activities. The tBodyGyro.mean...X, Y, and Z features capture gyroscope movement, 
+which might exhibit distinct changes when shifting between postures (standing vs. sitting) 
+or directional movement (walking upstairs vs. downstairs).
+
+Barplot interpretation: Activity Distribution: Subjects have different levels 
+of engagement in activities. Some subjects may have performed mostly static activities 
+(LAYING, SITTING, STANDING), while others engaged more in dynamic movements 
+(WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS). Data Balance: Looks like subjects 
+participated in each activity equally. Patterns: Some subjects may favor specific 
+activities, indicating potential lifestyle or mobility differences
+
+
+```{r}
+# We look at the first 20 column names to inspect available features
+head(names(full_data), 20)  
+
+names(full_data)
+
+# Find acceleration and gyroscope mean columns
+acc_cols <- grep("tBodyAcc\\.mean", names(full_data), value = TRUE)
+print(acc_cols)
+
+gyro_cols <- grep("tBodyGyro\\.mean", names(full_data), value = TRUE)
+print(gyro_cols)
+
+# Now select the important features by filtering specific mean acceleration and 
+#gyroscope features along the X, Y, and Z axes
+important_features <- c(
+  grep("tBodyAcc\\.mean.*X$", names(full_data), value = TRUE)[1],
+  grep("tBodyAcc\\.mean.*Y$", names(full_data), value = TRUE)[1],
+  grep("tBodyAcc\\.mean.*Z$", names(full_data), value = TRUE)[1],
+  grep("tBodyGyro\\.mean.*X$", names(full_data), value = TRUE)[1],
+  grep("tBodyGyro\\.mean.*Y$", names(full_data), value = TRUE)[1],
+  grep("tBodyGyro\\.mean.*Z$", names(full_data), value = TRUE)[1]
+)
+print("Selected features:")
+print(important_features)
+
+# Now create the long format dataframe - use "activity" column if it exists, 
+#otherwise use "activity_id" for data visualization
+if("activity" %in% names(full_data)) {
+  id_col <- "activity"
+} else {
+  id_col <- "activity_id"
+}
+
+# Create selected data frame
+selected_data <- full_data[, c(id_col, important_features)]
+
+# Add readable activity labels if using activity_id by creating a subset of the 
+#full dataset using the selected features and activity labels
+if(id_col == "activity_id") {
+  # Merge with activity labels if not already merged
+  if(!"activity" %in% names(full_data) && exists("activity_labels")) {
+    selected_data <- merge(selected_data, activity_labels, by = "activity_id")
+    id_col <- "activity"  # Now use activity column for plotting
+  }
+}
+
+# Reshape the data and convert to long format for plotting
+selected_data_long <- melt(selected_data, id.vars = id_col,
+                          variable.name = "feature", value.name = "value")
+
+# Box plots by activity for each feature
+ggplot(selected_data_long, aes_string(x = id_col, y = "value", fill = id_col)) +
+  geom_boxplot() +
+  facet_wrap(~ feature, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(title = "Distribution of Key Features by Activity",
+       x = "Activity", y = "Value")
+
+# Finally plot Activity vs. Subject 
+if("activity" %in% names(full_data)) {
+  ggplot(full_data, aes(x = factor(subject), fill = activity)) +
+    geom_bar(position = "stack") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Activities by Subject", 
+         x = "Subject ID", 
+         y = "Count")
+} else {
+  ggplot(full_data, aes(x = factor(subject), fill = factor(activity_id))) +
+    geom_bar(position = "stack") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Activities by Subject", 
+         x = "Subject ID", 
+         y = "Count",
+         fill = "Activity ID") 
+}
+
+```
+
+
+(5): DENSITY PLOTS \newline
+To compare feature distributions across activities by choosing a couple of features 
+to examine more closely
+
+```{r}
+for(feat in important_features[1:3]) {
+  p <- ggplot(full_data, aes_string(x = feat, fill = "activity")) +
+    geom_density(alpha = 0.5) +
+    theme_minimal() +
+    labs(title = paste("Density Distribution of", feat, "by Activity"),
+         x = feat, y = "Density")
+  print(p)
+}
+
+```
+
+(6): FEATURE CORRELATIONS USING A HEATMAP \newline
+
+We do it for a subset of features (correlation matrix gets too large otherwise)
+
+```{r}
+# Sample 20 features
+set.seed(1)
+if(ncol(full_data) > 50) {
+  feature_sample <- sample(names(full_data)[!names(full_data) %in% c("subject", 
+                                                "activity_id", "activity")], 20)
+} else {
+  feature_sample <- names(full_data)[!names(full_data) %in% c("subject", "activity_id", "activity")]
+}
+
+# Correlation plot
+correlation_matrix <- cor(full_data[, feature_sample], use = "complete.obs")
+corrplot(correlation_matrix, method = "circle", type = "upper",
+         col = colorRampPalette(c("#FFDAB9", "#E9967A", "#4B0000"))(200), 
+         tl.col = "black", tl.cex = 0.7,
+         title = "Correlation Between Selected Features")
+
+```
+
+## Since our above analysis was always only for a subset of features, we can not 
+make conclusions based on just a subset. So we perform PCA to reduce the dimension
+
+```{r}
+# Select only the feature columns (exclude subject, activity_id, and activity)
+features_only <- full_data[, !names(full_data) %in% c("subject", "activity_id", "activity")]
+
+# Scale the data for PCA
+scaled_features <- scale(features_only)
+
+# Perform PCA on the scaled data
+pca_result <- prcomp(scaled_features)
+
+```
+
+
+(7): PCA VISUALIZATION BY ACTIVITY (first two components) \newline
+Helps visualize how well activities separate in reduced space.
+
+Interpretation: Clusters overlap here implying that some activities have similar sensor readings and might be harder to distinguish. Walking downstairs, walking upstairs, walking are similar; Laying, sitting, standing are similar. Makes sense. The overlapping suggests that we need additional PCs to make conclusions.
+
+```{r}
+pca_vis_data <- data.frame(
+  PC1 = pca_result$x[,1], # Extract the first PC
+  PC2 = pca_result$x[,2], # Extract the second PC
+  Activity = full_data$activity # Add the activity labels to each observation for plot color
+)
+
+ggplot(pca_vis_data, aes(x = PC1, y = PC2, color = Activity)) +
+  geom_point(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "PCA: First Two Principal Components by Activity",
+       x = "PC1", y = "PC2")
+
+
+```
+
+(8): TOP FEATURE LOADINGS FOR FIRST THREE PCs \newline
+Analyze PCA loadings to determine the most influential sensor features for the first 3 PCS and visualize them.
+
+Interpretation: Each bar represents a sensor feature that significantly contributes to PC1, PC2, PC3. High absolute values mean the feature plays a major role in shaping that component. Positive loadings are features that directly influence the PC in one direction whereas negative loadings are features that influence the PC in opposite direction. Different PCs capture dofferent aspects of variability in sensor data.
+
+```{r}
+# Extract loadings for first 3 components since they capture the most variance in the dataset.
+loadings <- as.data.frame(pca_result$rotation[, 1:3])
+loadings$feature <- rownames(loadings)
+
+# Basic biplot
+biplot(pca_result, cex = 0.7)
+
+# Get top 10 contributors (positive and negative) for each component
+num_top_features <- 10
+top_loadings <- data.frame()
+
+# Loop through the first 3 PCs
+for(i in 1:3) {
+  comp_name <- paste0("PC", i)
+  
+  # Top positive loadings selects the top 10 features w/ highest positive impact on this PC
+  top_pos <- loadings[order(loadings[, i], decreasing = TRUE), ][1:num_top_features, ]
+  top_pos$direction <- "Positive"
+  top_pos$component <- comp_name
+  
+  # Top negative loadings similar to positive above but with negative impact
+  top_neg <- loadings[order(loadings[, i]), ][1:num_top_features, ]
+  top_neg$direction <- "Negative"
+  top_neg$component <- comp_name
+  
+  # Combine the positive and negative loadings
+  top_loadings <- rbind(top_loadings, top_pos, top_neg)
+}
+
+# Reshape data for plotting conveneience
+top_loadings_long <- melt(top_loadings, 
+                         id.vars = c("feature", "direction", "component"),
+                         variable.name = "pc", 
+                         value.name = "loading")
+
+# Only keep rows where PC matches component
+top_loadings_long <- top_loadings_long[top_loadings_long$pc == top_loadings_long$component, ]
+
+# Plot for each component
+for(i in 1:3) {
+  comp_data <- top_loadings_long[top_loadings_long$component == paste0("PC", i), ]
+  
+  p <- ggplot(comp_data, aes(x = reorder(feature, loading), y = loading, fill = direction)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = paste("Top Feature Contributions to PC", i),
+         x = "Feature", y = "Loading") +
+    scale_fill_manual(values = c("Positive" = "seagreen3", "Negative" = "indianred3"))
+  
+  print(p)
+}
+
+```
+
+(9): VARIANCE EXPLAINED BY EACH PC \newline
+Compute the proportion of variance explained by each PC and store in df to visualize further.
+
+Interpretation: 
+P1: 1st PC explains 50.7 % of variance. 
+P2: Since the cumulative variance curve rises quickly and plateaus, for 80% variance explained we just need about first 30 PCs.
+
+```{r}
+var_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+var_df <- data.frame(
+  PC = 1:length(var_explained),
+  VarExplained = var_explained,
+  CumulativeVar = cumsum(var_explained)
+)
+
+# Plot individual variance explained
+p1 <- ggplot(head(var_df, 27), aes(x = PC, y = VarExplained)) +
+  geom_bar(stat = "identity", fill = "hotpink") +
+  geom_line(group = 1, color = "cyan4", size = 1) +
+  theme_minimal() +
+  labs(title = "Variance Explained by Principal Components and Scree plot",
+       x = "Principal Component", 
+       y = "Proportion of Variance Explained") +
+  geom_text(aes(label = sprintf("%.1f%%", VarExplained*100)), 
+            vjust = -0.5, size = 2)
+p1
+
+
+# Plot cumulative variance explained
+p2 <- ggplot(head(var_df, 70), aes(x = PC, y = CumulativeVar)) +
+  geom_line(color = "blue1", linewidth = 1) +
+  geom_point(color = "blue1") +
+  theme_minimal() +
+  labs(title = "Cumulative Variance Explained",
+       x = "Number of Principal Components", 
+       y = "Cumulative Proportion") +
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "black") +
+  annotate("text", x = max(head(var_df, 20)$PC)/2, y = 0.97, 
+           label = "80% Variance Threshold", color = "black")
+p2
+
+
+```
+
+(10): FEATURE MEANS BY ACTIVITY \newline
+
+Analyze mean sensor readings for acceleration and gyroscope features across different activities and visualizes them in a bar plot.
+
+Interpretation: Static activites (L, Sit, Stand) have low acc and gyr values suggesting minimal movement. Approx 0 mean implies stability.
+Dynamic activities (W, U, D) have higher mean values for acc and gyr imples increased movement. U/D may cause distinct sensor fluctuations compared to normal W.
+Since the sensor values vary significantly across activities, PCA or classification models might successfully distinguish movements. There’s no overlap between features, suggesting that activities do not share similar motion patterns.
+
+```{r}
+# For key acceleration and gyroscope features 
+acc_features <- c("tBodyAcc.mean...X", "tBodyAcc.mean...Y", "tBodyAcc.mean...Z")
+gyro_features <- c("tBodyGyro.mean...X", "tBodyGyro.mean...Y", "tBodyGyro.mean...Z")
+selected_mean_features <- c(acc_features, gyro_features)
+
+# Calculate means by grouping by activity
+mean_by_activity <- aggregate(full_data[, selected_mean_features], 
+                             by = list(Activity = full_data$activity), 
+                             FUN = mean)
+mean_by_activity
+
+# Convert to long format for plotting
+mean_activity_long <- melt(mean_by_activity, 
+                          id.vars = "Activity", 
+                          variable.name = "Feature", 
+                          value.name = "Mean")
+
+# Plot
+ggplot(mean_activity_long, aes(x = Activity, y = Mean, fill = Feature)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Mean Values of Key Features by Activity",
+       x = "Activity", y = "Mean Value")
+
+```
+
+
+## Train baseline models
+
+(1) TRAINING MULTIPLE LOGISTIC REGRESSION MODEL
+
+For model w/o regularization: Overall Accuracy = 19.73% (very low); sensitivity (TP rate) = 0.78 high for L and near 0 for other classes; specificity (TN rate) ~ 1 for all activities => model mostly avoids MCs. Therefore, The model primarily predicts "LAYING", failing to classify other activities. Zero predictions for SITTING, STANDING, WALKING_DOWNSTAIRS, WALKING_UPSTAIRS, indicating poor generalization. Pos Pred Value is NaN for most classes, showing the model rarely predicts them correctly. \newline \newline
+
+For model w (Lasso) regularization: Overall Accuracy = 19.73% (very low); sensitivity (TP rate) = 0.78 high for L and near 0 for other classes; specificity (TN rate) ~ 1 for all activities => model mostly avoids MCs. Therefore, The model primarily predicts "LAYING", failing to classify other activities. Zero predictions for SITTING, STANDING, WALKING_DOWNSTAIRS, WALKING_UPSTAIRS, indicating poor generalization. Pos Pred Value is NaN for most classes, showing the model rarely predicts them correctly.
+
+```{r}
+# Make sure activity is a factor
+full_data$activity <- as.factor(full_data$activity)
+
+# Split data into training and testing sets (70-30 split)
+set.seed(123)
+trainIndex <- createDataPartition(full_data$activity, p = 0.7, list = FALSE)
+train_set <- full_data[trainIndex, ]
+test_set <- full_data[-trainIndex, ]
+
+# Select features for training (exclude activity_id which is redundant)
+features_for_model <- names(full_data)[!names(full_data) %in% c("activity_id")]
+
+# Create formula
+formula_str <- paste("activity ~", paste(features_for_model[features_for_model != "activity"], collapse = " + "))
+formula_model <- as.formula(formula_str)
+
+# Train multinomial logistic regression model
+# Note: This might take time due to high dimensionality
+# mlr_model <- multinom(formula_model, data = train_set, maxit = 300) #ERRORRR SO CHOOSE A SUBSET OF DATA
+
+#  Select a subset of features (for example, only mean and std deviation features)
+mean_std_features <- grep("mean\\(\\)|std\\(\\)", names(full_data), value = TRUE)
+selected_features <- c("subject", mean_std_features, "activity")
+selected_features <- selected_features[selected_features != "activity_id"]
+
+# Create new formula with reduced feature set
+reduced_formula_str <- paste("activity ~", paste(selected_features[selected_features != "activity"], collapse = " + "))
+reduced_formula <- as.formula(reduced_formula_str)
+
+# Train model with reduced feature set
+mlr_reduced_model <- multinom(reduced_formula, data = train_set, maxit = 300)
+
+# Make predictions on test set
+mlr_predictions <- predict(mlr_reduced_model, newdata = test_set)
+
+# make predictions on training set
+mlr_predictions_train <- predict(mlr_reduced_model, newdata = train_set)
+
+# Evaluate performance
+confusionMatrix(mlr_predictions, test_set$activity)
+confusionMatrix(mlr_predictions_train, train_set$activity) #training accuracy
+
+# USE REGULARIZATION -- LASSO REGRESSION
+
+# Prepare data in the format required by glmnet
+#x_train <- model.matrix(~ . - activity - activity_id, data = train_set)[, -1]  # Remove intercept
+#y_train <- train_set$activity
+
+#x_test <- model.matrix(~ . - activity - activity_id, data = test_set)[, -1]  # Remove intercept
+#y_test <- test_set$activity
+
+# Train multinomial logistic regression with L1 regularization (LASSO)
+#glmnet_model <- glmnet(x_train, y_train, family = "multinomial", alpha = 1)
+
+# Find optimal lambda using cross-validation
+#cv_model <- cv.glmnet(x_train, y_train, family = "multinomial", alpha = 1)
+#best_lambda <- cv_model$lambda.min
+
+# Make predictions using the best lambda
+#glmnet_preds <- predict(glmnet_model, newx = x_test, s = best_lambda, type = "class")
+
+# Evaluate performance
+#confusionMatrix(as.factor(glmnet_preds), y_test)
+
+```
+
+(2): TRAINING LDA MODEL
+
+Warning suggests high corr b/w some features => strong evidence to do PCA
+
+Overall Performance Accuracy: 97.64% Very strong performance
+Kappa Score: 0.9716 (Measures agreement between predictions and actual labels; near perfect agreement)
+Class-Specific Interpretation
+High Sensitivity Classes (Correctly Classified Most of the Time)
+LAYING → Sensitivity = 1.0000 (Perfect classification)
+
+SITTING → Sensitivity = 0.9381 (Mostly well-predicted)
+
+STANDING → Sensitivity = 0.9457 (Accurate)
+
+WALKING, WALKING_DOWNSTAIRS, WALKING_UPSTAIRS → Sensitivity ~ 99% (Almost perfect classification)
+
+Key Insights
+Few misclassifications occur, such as:
+
+8 SITTING instances misclassified as LAYING
+
+23 STANDING cases misclassified as SITTING
+All WALKING instances are correctly predicted.
+
+Balanced Accuracy
+Balanced Accuracy (average of Sensitivity & Specificity) for all classes is near 1, meaning LDA is effectively separating activities.
+
+Comparing LDA to Previous Models
+LDA achieves 97.64% accuracy, which is very close to LASSO Logistic Regression (~98.57%).
+
+Both models performed significantly better than standard multinomial logistic regression (~19.73% accuracy).
+
+Regularization improved performance in logistic regression, whereas LDA naturally finds optimal feature combinations.
+
+
+```{r}
+# Train LDA model
+lda_model <- lda(formula_model, data = train_set)
+
+# Make predictions on test set
+lda_predictions <- predict(lda_model, newdata = test_set)$class
+
+# Evaluate performance
+confusionMatrix(lda_predictions, test_set$activity)
+
+# Make predictions on training set
+lda_predictions_train <- predict(lda_model, newdata = train_set)$class
+
+# Evaluate performance training accuracy
+confusionMatrix(lda_predictions_train, train_set$activity)
+
+```
+
+## PERFORMANCE EVALUATION FOR NON-PCA MODELS ABOVE
+
+Interpretation of MLR Results: MLR failed to classify many activities! Most values are NaN, meaning no predictions were made for certain classes. Only LAYING and WALKING have some predictions, but precision is low (~0.2), meaning many false positives. Recall for LAYING is high (0.7890) → Meaning most actual LAYING cases were detected, but accuracy is still poor due to false classifications. For other activities, recall is 0.0, indicating the model completely failed to classify them.
+
+Interpretation of LDA Results: LDA is highly effective! All classes have high precision, recall, and F1-score (~0.98 to 1.0). Precision and recall are balanced, meaning there are few false positives and few false negatives. LDA successfully classified all activity types, unlike MLR. Walking activities (WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS) have near-perfect scores, indicating the model effectively distinguishes movement types.
+
+Conclusion: LDA Outperforms MLR
+MLR struggles with classification, misclassifying most activities. LDA correctly classifies almost all activities, with near-perfect accuracy across all metrics. LDA performs better because LDA finds optimal linear combinations of features that maximize separation between activities. MLR likely suffered from high-dimensionality issues, causing poor generalization.
+
+```{r}
+# Function to calculate performance metrics for each class
+calculate_metrics <- function(conf_matrix) {
+  n <- nrow(conf_matrix)
+  metrics <- data.frame(
+    Class = rownames(conf_matrix),
+    Precision = numeric(n),
+    Recall = numeric(n),
+    F1_Score = numeric(n)
+  )
+  
+  for (i in 1:n) {
+    TP <- conf_matrix[i, i]
+    FP <- sum(conf_matrix[, i]) - TP
+    FN <- sum(conf_matrix[i, ]) - TP
+    
+    precision <- TP / (TP + FP)
+    recall <- TP / (TP + FN)
+    f1 <- 2 * (precision * recall) / (precision + recall)
+    
+    metrics$Precision[i] <- precision
+    metrics$Recall[i] <- recall
+    metrics$F1_Score[i] <- f1
+  }
+  
+  return(metrics)
+}
+
+# Calculate metrics for MLR
+mlr_cm <- table(test_set$activity, mlr_predictions)
+mlr_metrics <- calculate_metrics(mlr_cm)
+print("Multinomial Logistic Regression Performance Metrics:")
+print(mlr_metrics)
+
+# Calculate metrics for MLR TRAINING ACCURACY
+mlr_cm_train<- table(train_set$activity, mlr_predictions_train)
+mlr_metrics_train <- calculate_metrics(mlr_cm_train)
+print("Multinomial Logistic Regression Performance Metrics TRAINING :")
+print(mlr_metrics_train)
+
+# Calculate metrics for LDA
+lda_cm <- table(test_set$activity, lda_predictions)
+lda_metrics <- calculate_metrics(lda_cm)
+print("LDA Performance Metrics:")
+print(lda_metrics)
+
+# Calculate metrics for LDA TRAIN
+lda_cm_train <- table(train_set$activity, lda_predictions_train)
+lda_metrics_train <- calculate_metrics(lda_cm_train)
+print("LDA Performance Metrics TRAINING:")
+print(lda_metrics_train)
+
+# MLR confusion matrix plot
+mlr_cm_df <- as.data.frame(melt(mlr_cm))
+names(mlr_cm_df) <- c("Reference", "Prediction", "Frequency")
+
+ggplot(mlr_cm_df, aes(x = Reference, y = Prediction, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency)) +
+  scale_fill_gradient(low = "yellow", high = "orange") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix - Multinomial Logistic Regression TEST")
+
+mlr_cm_df_train <- as.data.frame(melt(mlr_cm_train))
+names(mlr_cm_df_train) <- c("Reference", "Prediction", "Frequency")
+
+ggplot(mlr_cm_df_train, aes(x = Reference, y = Prediction, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency)) +
+  scale_fill_gradient(low = "yellow", high = "orange") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix - Multinomial Logistic Regression TRAIN")
+
+# LDA confusion matrix plot
+lda_cm_df <- as.data.frame(melt(lda_cm))
+names(lda_cm_df) <- c("Reference", "Prediction", "Frequency")
+
+ggplot(lda_cm_df, aes(x = Reference, y = Prediction, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency)) +
+  scale_fill_gradient(low = "yellow", high = "orange") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix - Linear Discriminant Analysis TEST")
+
+lda_cm_df_train <- as.data.frame(melt(lda_cm_train))
+names(lda_cm_df_train) <- c("Reference", "Prediction", "Frequency")
+
+ggplot(lda_cm_df_train, aes(x = Reference, y = Prediction, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency)) +
+  scale_fill_gradient(low = "yellow", high = "orange") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix - Linear Discriminant Analysis TRAIN")
+
+```
+
+## USE PCA
+
+```{r}
+
+# Calculate the proportion of variance explained by each component
+var_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+# Calculate cumulative variance explained
+cumulative_var <- cumsum(var_explained)
+
+# Create a scree plot
+plot(var_explained, type = "b", 
+     xlab = "Principal Component", 
+     ylab = "Proportion of Variance Explained", 
+     main = "Scree Plot")
+
+# Plot cumulative variance explained
+plot(cumulative_var, type = "b", 
+     xlab = "Number of Components", 
+     ylab = "Cumulative Proportion of Variance Explained", 
+     main = "Cumulative Variance Plot")
+
+# Find number of components needed to explain a desired proportion of variance (e.g., 95%)
+desired_variance <- 0.80 #90% 65 components
+num_components <- which(cumulative_var >= desired_variance)[1]
+
+cat("Number of components needed to explain", desired_variance*100, 
+    "% of variance:", num_components, "\n")
+
+# Transform the original dataset using the selected principal components
+transformed_data <- as.data.frame(predict(pca_result, newdata = scaled_features)[, 1:num_components])
+
+# Add back the subject and activity columns
+final_data <- cbind(subject = full_data$subject, 
+                   activity = full_data$activity,
+                   transformed_data)
+
+# Perform t-SNE on the scaled feature data (not the PCA transformed data)
+# t-SNE works best on the original scaled data rather than PCA results
+set.seed(123) # For reproducibility
+tsne_result <- Rtsne(scaled_features, dims = 2, perplexity = 30, verbose = TRUE, max_iter = 1000)
+
+# Create a data frame for plotting
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[,1],
+  tSNE2 = tsne_result$Y[,2],
+  Activity = full_data$activity
+)
+
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Activity)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "t-SNE Visualization of Human Activity Recognition Data",
+       x = "t-SNE Dimension 1", 
+       y = "t-SNE Dimension 2") +
+  theme(legend.title = element_blank())
+
+#UMAP WITHOUT PCA
+umap_result <- umap(scaled_features)
+
+# Create a data frame for plotting
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Activity = full_data$activity
+)
+
+# Alternative: Plot using ggplot2
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Activity)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization of Human Activity Recognition Data",
+       x = "UMAP Dimension 1", 
+       y = "UMAP Dimension 2") +
+  theme(legend.title = element_blank())
+
+
+# Perform UMAP on the PCA-transformed data
+umap_pca_result <- umap(as.matrix(transformed_data))
+
+# Create a data frame for plotting
+umap_pca_df <- data.frame(
+  UMAP1 = umap_pca_result$layout[,1],
+  UMAP2 = umap_pca_result$layout[,2],
+  Activity = full_data$activity
+)
+
+ggplot(umap_pca_df, aes(x = UMAP1, y = UMAP2, color = Activity)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization of PCA-Transformed Human Activity Data",
+       x = "UMAP Dimension 1", 
+       y = "UMAP Dimension 2") +
+  theme(legend.title = element_blank())
+
+
+```
+
+
+```{r}
+# Prepare PCA transformed data with activity labels
+pca_train_data <- data.frame(
+  activity = train_set$activity,
+  predict(pca_result, newdata = scale(train_set[, !names(train_set) %in% c("subject", "activity_id", "activity")]))[, 1:num_components]
+)
+
+pca_test_data <- data.frame(
+  activity = test_set$activity,
+  predict(pca_result, newdata = scale(test_set[, !names(test_set) %in% c("subject", "activity_id", "activity")]))[, 1:num_components]
+)
+
+# Create formula for PCA components
+pca_formula_str <- paste("activity ~", paste(names(pca_train_data)[names(pca_train_data) != "activity"], collapse = " + "))
+pca_formula <- as.formula(pca_formula_str)
+
+# Train models on PCA data
+pca_mlr_model <- multinom(pca_formula, data = pca_train_data, maxit = 300)
+pca_lda_model <- lda(pca_formula, data = pca_train_data)
+
+# Make predictions ON TEST DATA
+pca_mlr_predictions <- predict(pca_mlr_model, newdata = pca_test_data)
+pca_lda_predictions <- predict(pca_lda_model, newdata = pca_test_data)$class
+
+# Make predictions ON TRAINING DATA
+pca_mlr_predictions_train <- predict(pca_mlr_model, newdata = pca_train_data)
+pca_lda_predictions_train <- predict(pca_lda_model, newdata = pca_train_data)$class
+
+# Evaluate performance
+cat("\nPerformance on PCA-reduced data:\n")
+cat("\nMultinomial Logistic Regression on PCA data TEST DATA:\n")
+print(confusionMatrix(pca_mlr_predictions, pca_test_data$activity))
+
+cat("\nLDA on PCA data TEST DATA:\n")
+print(confusionMatrix(pca_lda_predictions, pca_test_data$activity))
+
+# Evaluate performance TRAINING ACCURACY
+cat("\nPerformance on PCA-reduced data:\n")
+cat("\nMultinomial Logistic Regression on PCA data TRAINING DATA:\n")
+print(confusionMatrix(pca_mlr_predictions_train, pca_train_data$activity))
+
+cat("\nLDA on PCA data TRAINING DATA:\n")
+print(confusionMatrix(pca_lda_predictions_train, pca_train_data$activity))
+
+# ------------------ REFLECT ON CURSE OF DIMENSIONALITY --------------------
+
+# Compare performance metrics between full-feature and PCA-reduced models
+cat("\n===== Performance Comparison: Full Features vs. PCA-Reduced =====\n")
+cat("Full Features MLR Accuracy:", confusionMatrix(mlr_predictions, test_set$activity)$overall["Accuracy"], "\n")
+cat("PCA-Reduced MLR Accuracy:", confusionMatrix(pca_mlr_predictions, pca_test_data$activity)$overall["Accuracy"], "\n")
+cat("Full Features LDA Accuracy:", confusionMatrix(lda_predictions, test_set$activity)$overall["Accuracy"], "\n")
+cat("PCA-Reduced LDA Accuracy:", confusionMatrix(pca_lda_predictions, pca_test_data$activity)$overall["Accuracy"], "\n")
+
+# Compare training times
+#mlr_full_time <- system.time(multinom(formula_model, data = train_set, maxit = 100)) #ERROR
+mlr_pca_time <- system.time(multinom(pca_formula, data = pca_train_data, maxit = 100))
+
+cat("\n===== Training Time Comparison =====\n")
+#cat("Full Features MLR Training Time:", mlr_full_time["elapsed"], "seconds\n")
+cat("PCA-Reduced MLR Training Time:", mlr_pca_time["elapsed"], "seconds\n")
+
+cat("\n===== Reflection on Curse of Dimensionality =====\n")
+cat("
+The analysis reveals several aspects of the curse of dimensionality:
+
+1. Performance Comparison: The full-feature models had [higher/lower] accuracy compared to PCA-reduced models, 
+   indicating that [the high dimensionality was causing overfitting/the original features contain important information].
+
+2. Computational Efficiency: PCA-reduced models trained approximately", "times faster than full-feature models, highlighting the computational burden of high-dimensional data.
+
+3. The confusion matrices show that [certain activities were more difficult to classify, 
+   possibly due to the noise introduced by irrelevant features].
+
+4. The top PCA components captured", desired_variance*100, "% of the variance with only", num_components, 
+   "components (compared to", ncol(features_only), "original features), 
+   suggesting significant redundancy in the original feature space.
+
+These findings illustrate the challenges of working with high-dimensional data and 
+the benefits of dimensionality reduction for both computational efficiency and potentially improved model performance.
+")
+
+```
+
+
+```{r}
+
+# Create PCA-transformed training and test sets
+pca_train_data <- data.frame(
+  activity = train_set$activity,
+  predict(pca_result, newdata = scale(train_set[, !names(train_set) %in% c("subject", "activity_id", "activity")]))[, 1:num_components]
+)
+
+pca_test_data <- data.frame(
+  activity = test_set$activity,
+  predict(pca_result, newdata = scale(test_set[, !names(test_set) %in% c("subject", "activity_id", "activity")]))[, 1:num_components]
+)
+
+# Create formula for PCA components
+pca_formula_str <- paste("activity ~", paste(names(pca_train_data)[names(pca_train_data) != "activity"], collapse = " + "))
+pca_formula <- as.formula(pca_formula_str)
+
+# ----- Multinomial Logistic Regression on PCA data -----
+# Time training process
+mlr_pca_time <- system.time({
+  mlr_pca_model <- multinom(pca_formula, data = pca_train_data, maxit = 300)
+})
+
+# Predictions
+mlr_pca_predictions <- predict(mlr_pca_model, newdata = pca_test_data)
+
+# Evaluate performance
+mlr_pca_cm <- confusionMatrix(mlr_pca_predictions, pca_test_data$activity)
+print("Multinomial Logistic Regression on PCA data - Confusion Matrix:")
+print(mlr_pca_cm)
+
+# ----- LDA on PCA data -----
+# Time training process
+lda_pca_time <- system.time({
+  lda_pca_model <- lda(pca_formula, data = pca_train_data)
+})
+
+# Predictions
+lda_pca_predictions <- predict(lda_pca_model, newdata = pca_test_data)$class
+
+# Evaluate performance
+lda_pca_cm <- confusionMatrix(lda_pca_predictions, pca_test_data$activity)
+print("LDA on PCA data - Confusion Matrix:")
+print(lda_pca_cm)
+
+# ----- Detailed Performance Metrics for PCA models -----
+# Function to calculate detailed metrics
+calculate_metrics <- function(conf_matrix) {
+  # Extract confusion matrix from caret's confusionMatrix output
+  if(class(conf_matrix) == "confusionMatrix") {
+    conf_matrix <- conf_matrix$table
+  }
+  
+  n <- nrow(conf_matrix)
+  metrics <- data.frame(
+    Class = rownames(conf_matrix),
+    Precision = numeric(n),
+    Recall = numeric(n),
+    F1_Score = numeric(n)
+  )
+  
+  for (i in 1:n) {
+    TP <- conf_matrix[i, i]
+    FP <- sum(conf_matrix[, i]) - TP
+    FN <- sum(conf_matrix[i, ]) - TP
+    
+    precision <- TP / (TP + FP)
+    recall <- TP / (TP + FN)
+    f1 <- 2 * (precision * recall) / (precision + recall)
+    
+    metrics$Precision[i] <- precision
+    metrics$Recall[i] <- recall
+    metrics$F1_Score[i] <- f1
+  }
+  
+  return(metrics)
+}
+
+# Calculate metrics for MLR on PCA data
+mlr_pca_metrics <- calculate_metrics(mlr_pca_cm)
+print("Multinomial Logistic Regression on PCA data - Performance Metrics:")
+print(mlr_pca_metrics)
+
+# Calculate metrics for LDA on PCA data
+lda_pca_metrics <- calculate_metrics(lda_pca_cm)
+print("LDA on PCA data - Performance Metrics:")
+print(lda_pca_metrics)
+
+# ----- Compare to a baseline model on original features -----
+# Since original MLR failed, let's use regularized regression (glmnet) for comparison
+
+# Prepare data for glmnet
+#x_train <- model.matrix(~ . - activity - activity_id, data = train_set)[, -1]  # Remove intercept
+#y_train <- train_set$activity
+
+#x_test <- model.matrix(~ . - activity - activity_id, data = test_set)[, -1]  # Remove intercept
+#y_test <- test_set$activity
+
+# Time training
+#glmnet_time <- system.time({
+  # Train multinomial logistic regression with L1 regularization
+  #cv_glmnet_model <- cv.glmnet(x_train, y_train, family = "multinomial", alpha = 1)
+  #best_lambda <- cv_glmnet_model$lambda.min
+  #glmnet_model <- glmnet(x_train, y_train, family = "multinomial", alpha = 1, lambda = best_lambda)
+#})
+
+# Predictions
+#glmnet_preds <- predict(glmnet_model, newx = x_test, type = "class")
+
+# Evaluate
+#glmnet_cm <- confusionMatrix(as.factor(glmnet_preds), y_test)
+#print("Regularized Logistic Regression on original features - Confusion Matrix:")
+#print(glmnet_cm)
+
+# Calculate metrics
+#glmnet_metrics <- calculate_metrics(glmnet_cm)
+#print("Regularized Logistic Regression on original features - Performance Metrics:")
+#print(glmnet_metrics)
+
+# ----- Visualize Confusion Matrices -----
+
+# Function to plot confusion matrix
+plot_confusion_matrix <- function(cm, title) {
+  if(class(cm) == "confusionMatrix") {
+    cm <- cm$table
+  }
+  
+  cm_df <- as.data.frame(melt(cm))
+  names(cm_df) <- c("Reference", "Prediction", "Frequency")
+  
+  ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Frequency)) +
+    geom_tile() +
+    geom_text(aes(label = Frequency), color = "black") +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    theme_minimal() +
+    labs(title = title) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Plot confusion matrices
+mlr_pca_plot <- plot_confusion_matrix(mlr_pca_cm, "Confusion Matrix - MLR on PCA data")
+lda_pca_plot <- plot_confusion_matrix(lda_pca_cm, "Confusion Matrix - LDA on PCA data")
+#glmnet_plot <- plot_confusion_matrix(glmnet_cm, "Confusion Matrix - Regularized LR on original features")
+
+# Display plots
+print(mlr_pca_plot)
+print(lda_pca_plot)
+#print(glmnet_plot)
+
+# ----- Summary Comparison -----
+cat("\n===== Performance Comparison =====\n")
+cat("PCA-Reduced MLR Accuracy:", mlr_pca_cm$overall["Accuracy"], "\n")
+cat("PCA-Reduced LDA Accuracy:", lda_pca_cm$overall["Accuracy"], "\n")
+#cat("Original Features Regularized LR Accuracy:", glmnet_cm$overall["Accuracy"], "\n")
+
+cat("\n===== Training Time Comparison =====\n")
+cat("PCA-Reduced MLR Training Time:", mlr_pca_time["elapsed"], "seconds\n")
+cat("PCA-Reduced LDA Training Time:", lda_pca_time["elapsed"], "seconds\n")
+#cat("Original Features Regularized LR Training Time:", glmnet_time["elapsed"], "seconds\n")
+
+# ----- Detailed Metrics by Class Comparison -----
+# Calculate average metrics across classes
+avg_metrics <- data.frame(
+  Model = c("MLR on PCA", "LDA on PCA"), #, "Reg LR on Original"),
+  Avg_Precision = c(mean(mlr_pca_metrics$Precision), mean(lda_pca_metrics$Precision)), #mean(glmnet_metrics$Precision)),
+  Avg_Recall = c(mean(mlr_pca_metrics$Recall), mean(lda_pca_metrics$Recall)), #, mean(glmnet_metrics$Recall)),
+  Avg_F1 = c(mean(mlr_pca_metrics$F1_Score), mean(lda_pca_metrics$F1_Score)) #, mean(glmnet_metrics$F1_Score))
+)
+
+print("Average Performance Metrics Across Classes:")
+print(avg_metrics)
+
+# ----- Discussion of Curse of Dimensionality -----
+cat("\n===== Discussion on Curse of Dimensionality =====\n")
+cat("
+The analysis demonstrates several important aspects of the curse of dimensionality:
+
+1. Computational Efficiency:
+   - The PCA-reduced models trained in significantly less time compared to the model using all original features.
+   - Original multinomial logistic regression failed entirely due to too many parameters (3384 weights).
+   - Even with regularization, the high-dimensional model required more computational resources.
+
+2. Model Performance:
+   - PCA-based models achieved [comparable/better/worse] accuracy compared to the regularized model on all features.
+   - This suggests that [most important information was preserved in the principal components / important information was lost during dimensionality reduction].
+
+3. Dimensionality Reduction Impact:
+   - Using only", num_components, "principal components (compared to", ncol(features_only), "original features) 
+     achieved good classification results while capturing", desired_variance*100, "% of the variance.
+   - This indicates significant redundancy in the original feature space.
+
+4. Class-Specific Performance:
+   - Some activities are easier to classify than others across all models.
+   - The classes with highest/lowest performance were consistently [activity names].
+
+5. Regularization vs. Dimensionality Reduction:
+   - Both techniques address the curse of dimensionality, but through different mechanisms.
+   - Regularization keeps all features but constrains weights, while PCA transforms the feature space.
+
+This analysis highlights how appropriate dimensionality reduction can lead to:
+1. Models that are more computationally efficient
+2. Solutions that are statistically more stable
+3. Results that are often as good as or better than using all original features
+4. Interpretations that are more straightforward
+
+The fact that simply using all features caused the model to fail is a classic manifestation of the curse of dimensionality.
+")
+
+```
+

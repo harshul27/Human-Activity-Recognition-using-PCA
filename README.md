@@ -1,5 +1,3 @@
-# Human-Activity-Recognition-using-PCA
-
 # 🏃‍♂️ Human Activity Recognition Using PCA
 
 A collaborative student project to classify human activity from smartphone motion data using dimensionality reduction and classical machine learning models.
